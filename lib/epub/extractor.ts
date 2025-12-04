@@ -78,7 +78,7 @@ export class EpubExtractor {
     const total = chaptersWithPaths.length
 
     if (total === 1 && !chaptersWithPaths[0].hasSelectedChildren) {
-      return this.extractSingleChapter(chaptersWithPaths[0].chapter, onProgress)
+      return this.extractSingleChapter(chaptersWithPaths[0], onProgress)
     }
 
     return this.extractMultipleChaptersWithHierarchy(chaptersWithPaths, onProgress)
@@ -175,15 +175,18 @@ export class EpubExtractor {
   /**
    * Extracts a single chapter as an EPUB file
    */
-  private async extractSingleChapter(chapter: EpubChapter, onProgress: ProgressCallback): Promise<ExtractionResult> {
+  private async extractSingleChapter(chapterWithPath: ChapterWithPath, onProgress: ProgressCallback): Promise<ExtractionResult> {
+    const { chapter, zipPath } = chapterWithPath
     const newFiles: Record<string, Uint8Array> = {}
     this.copyBaseFiles(newFiles)
     this.copyAllChapterFiles(chapter, newFiles)
 
     this.reportProgress(onProgress, "extracting", 1, 1)
 
-    // Use chapter title as the new book title
-    const newTitle = `${this.metadata.title} - ${chapter.title}`
+    // Build metadata title: 01_02_BookTitle/Chapter Title/Sub Title
+    const { numberPrefix, titlePath } = this.buildMetadataTitle(zipPath)
+    const newTitle = `${numberPrefix}_${this.metadata.title}/${titlePath}`
+      .replace(new RegExp(`/${this.metadata.title}/`, "g"), "/") // Remove duplicate book title
     this.updateOpfFile(newFiles, [chapter], newTitle)
     this.updateNcxFile(newFiles, [chapter])
 
@@ -242,9 +245,10 @@ export class EpubExtractor {
       this.copyBaseFiles(chapterFiles)
       this.copyAllChapterFiles(chapter, chapterFiles)
       
-      // Create new title from zip path (replace / and _ with readable format)
-      const readableTitle = this.createReadableTitle(zipPath)
-      const newTitle = `${this.metadata.title} - ${readableTitle}`
+      // Build metadata title: 01_02_BookTitle/Chapter Title/Sub Title
+      const { numberPrefix, titlePath } = this.buildMetadataTitle(zipPath)
+      const newTitle = `${numberPrefix}_${this.metadata.title}/${titlePath}`
+        .replace(new RegExp(`/${this.metadata.title}/`, "g"), "/") // Remove duplicate book title
       this.updateOpfFile(chapterFiles, [chapter], newTitle)
       this.updateNcxFile(chapterFiles, [chapter])
 
@@ -262,19 +266,75 @@ export class EpubExtractor {
 
   /**
    * Creates a readable title from a zip path
-   * Converts "01_Part_1/02_Chapter_2" to "Part 1 - Chapter 2"
+   * Converts "01_Part_1/02_•_Chapter_2_•_Title" to "Part 1 - Chapter 2 Title"
    */
   private createReadableTitle(zipPath: string): string {
     return zipPath
       .split("/")
       .map((part) => {
-        // Remove leading number prefix (e.g., "01_" or "01_02_")
         return part
-          .replace(/^\d+_/, "")
-          .replace(/_/g, " ")
+          // Remove leading number prefix (e.g., "01_" or "01_02_")
+          .replace(/^(\d+_)+/, "")
+          // Remove bullet points and clean up
+          .replace(/•/g, "")
+          .replace(/_+/g, " ")
+          .replace(/\s+/g, " ")
           .trim()
       })
+      .filter((part) => part.length > 0)
       .join(" - ")
+  }
+
+  /**
+   * Cleans chapter title for metadata (removes bullets, extra spaces)
+   */
+  private cleanChapterTitle(title: string): string {
+    return title
+      .replace(/•/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+  }
+
+  /**
+   * Builds metadata title from zipPath
+   * Input: "01_Part_1/02_Chapter_1_Mr_Sherlock_Holmes" 
+   * Output: { numberPrefix: "01_02", titlePath: "Part 1/Chapter 1 Mr Sherlock Holmes" }
+   */
+  private buildMetadataTitle(zipPath: string): { numberPrefix: string; titlePath: string } {
+    const parts = zipPath.split("/")
+    const numbers: number[] = []
+    const titles: string[] = []
+
+    for (const part of parts) {
+      // Extract leading number (e.g., "01" from "01_Part_1")
+      const match = part.match(/^(\d+)_(.+)$/)
+      if (match) {
+        numbers.push(parseInt(match[1], 10))
+        // Clean the title part: replace underscores with spaces, clean bullets
+        const cleanedTitle = match[2]
+          .replace(/•/g, "")
+          .replace(/_/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+        titles.push(cleanedTitle)
+      } else {
+        // No number prefix, just clean the title
+        const cleanedTitle = part
+          .replace(/•/g, "")
+          .replace(/_/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+        titles.push(cleanedTitle)
+      }
+    }
+
+    // Format numbers with consistent 2-digit padding
+    const formattedNumbers = numbers.map((n) => n.toString().padStart(2, "0"))
+
+    return {
+      numberPrefix: formattedNumbers.join("_"),
+      titlePath: titles.join("/"),
+    }
   }
 
   /**
@@ -282,8 +342,11 @@ export class EpubExtractor {
    */
   private sanitizeFilename(title: string, index: number): string {
     const cleaned = title
-      .replace(/[<>:"/\\|?*]/g, "")
-      .replace(/\s+/g, "_")
+      .replace(/•/g, "")              // Remove bullet points
+      .replace(/[<>:"/\\|?*]/g, "")   // Remove invalid filename chars
+      .replace(/\s+/g, "_")           // Spaces to underscores
+      .replace(/_+/g, "_")            // Collapse multiple underscores
+      .replace(/^_|_$/g, "")          // Trim leading/trailing underscores
       .substring(0, 50)
       .trim()
 
